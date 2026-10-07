@@ -16,6 +16,7 @@ module AmberCLI::Commands
     GENERATED_HOOK_VERSION    = AmberCLI::Agent::AgentSetupGuidance::GENERATED_HOOK_VERSION
     DOCUMENT_START            = AmberCLI::Agent::AgentSetupGuidance::DOCUMENT_START
     DOCUMENT_END              = AmberCLI::Agent::AgentSetupGuidance::DOCUMENT_END
+    WATCHER_INSTRUCTION       = "When `crystal-alpha watch status` says nothing is watching, ask the user to start `amber watch`: it runs the watcher the hooks build with."
 
     def help_description : String
       "Set up the Claude Code and Codex agent loop for a Crystal project"
@@ -137,6 +138,9 @@ module AmberCLI::Commands
           unless updated_section.includes?(required_lookup_instruction)
             updated_section += "\n#{required_lookup_instruction}"
           end
+          unless updated_section.includes?(WATCHER_INSTRUCTION)
+            updated_section += "\n#{WATCHER_INSTRUCTION}"
+          end
           unless updated_section.includes?("stop and tell the user to run `amber setup:agent`")
             updated_section += "\nThe SessionStart hook reports whether setup is complete. When setup is missing, stop and tell the user to run `amber setup:agent` before editing Crystal files."
           end
@@ -154,6 +158,7 @@ module AmberCLI::Commands
       ## Agent loop
 
       Run `crystal-alpha watch build` after edits. Do not start another watcher.
+      #{WATCHER_INSTRUCTION}
       Use `crystal-alpha spec --affected` when available. Format Crystal files with
       `crystal-alpha tool format`. The installed hooks hold the watcher during
       edits, check each changed file, and build when the agent stops.

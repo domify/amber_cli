@@ -130,7 +130,7 @@ describe "amber setup:agent" do
       setup_manifest = AmberCLI::Agent::AgentSetupManifest.from_json(File.read(".amber/agent_setup.json"))
       setup_manifest.amber_cli_version.should eq(AmberCli::VERSION)
       setup_manifest.minimum_amber_lsp_version.should eq("1.0.0")
-      setup_manifest.generated_hook_version.should eq("6")
+      setup_manifest.generated_hook_version.should eq("7")
       File.file?(".amber/claude-marketplace/amber-lsp/.lsp.json").should be_true
       File.file?(".lsp.json").should be_false
       File.info(".amber/amber-agent-hook").permissions.to_i.&(0o111).should_not eq(0)
@@ -384,6 +384,60 @@ describe "amber setup:agent" do
       calls.should_not contain("compiler watch release")
       calls.should_not contain("compiler watch build")
       calls.should contain("compiler build --no-codegen src/my_app.cr")
+    end
+  end
+
+  it "picks a newer coordinating crystal over an old crystal-alpha" do
+    SpecHelper.within_temp_directory do |project|
+      Dir.mkdir_p("src")
+      File.write("shard.yml", "name: my_app\ntargets:\n  my_app:\n    main: src/my_app.cr\n")
+      File.write("src/my_app.cr", "puts :ok\n")
+      AmberCLI::Commands::SetupAgentCommand.new("setup:agent").execute
+
+      tools = File.join(project, "fake-tools")
+      Dir.mkdir_p(tools)
+      log = File.join(project, "calls.log")
+      old_alpha = File.join(tools, "crystal-alpha")
+      File.write(old_alpha, "#!/bin/sh\nprintf 'alpha %s\\n' \"$*\" >> \"$TEST_COMMAND_LOG\"\necho 'Usage: crystal watch [options] [programfile]'\nexit 1\n")
+      crystal = File.join(tools, "crystal")
+      File.write(crystal, "#!/bin/sh\nprintf 'crystal %s\\n' \"$*\" >> \"$TEST_COMMAND_LOG\"\n[ \"$*\" = 'watch --help' ] && echo '       crystal watch hold [reason]'\nexit 0\n")
+      File.chmod(old_alpha, 0o755)
+      File.chmod(crystal, 0o755)
+      hook = File.join(project, ".amber/amber-agent-hook")
+      environment = {"PATH" => "#{tools}:/usr/bin:/bin", "TEST_COMMAND_LOG" => log}
+
+      errors = IO::Memory.new
+      status = Process.run(hook, ["pre"], input: IO::Memory.new("{}"), output: IO::Memory.new, error: errors, env: environment)
+      status.exit_code.should eq(0)
+      errors.to_s.should_not contain("using stock crystal")
+      calls = File.read(log)
+      calls.should contain("crystal watch hold")
+      calls.should_not contain("alpha watch hold")
+    end
+  end
+
+  it "keeps coordinating with a watcher whose last build failed" do
+    SpecHelper.within_temp_directory do |project|
+      Dir.mkdir_p("src")
+      File.write("shard.yml", "name: my_app\ntargets:\n  my_app:\n    main: src/my_app.cr\n")
+      File.write("src/my_app.cr", "puts :ok\n")
+      AmberCLI::Commands::SetupAgentCommand.new("setup:agent").execute
+
+      tools = File.join(project, "fake-tools")
+      Dir.mkdir_p(tools)
+      log = File.join(project, "calls.log")
+      compiler = File.join(tools, "crystal-alpha")
+      File.write(compiler, "#!/bin/sh\nprintf 'compiler %s\\n' \"$*\" >> \"$TEST_COMMAND_LOG\"\ncase \"$*\" in\n  'watch --help') echo '       crystal watch hold [reason]' ;;\n  'watch status') echo 'failed: Compilation failed'; exit 1 ;;\nesac\nexit 0\n")
+      File.chmod(compiler, 0o755)
+      hook = File.join(project, ".amber/amber-agent-hook")
+      environment = {"PATH" => "#{tools}:/usr/bin:/bin", "TEST_COMMAND_LOG" => log}
+
+      Process.run(hook, ["pre"], input: IO::Memory.new("{}"), output: IO::Memory.new, error: IO::Memory.new, env: environment).exit_code.should eq(0)
+      Process.run(hook, ["stop"], input: IO::Memory.new("{}"), output: IO::Memory.new, error: IO::Memory.new, env: environment).exit_code.should eq(0)
+      calls = File.read(log)
+      calls.should contain("compiler watch hold")
+      calls.should contain("compiler watch build")
+      calls.should_not contain("compiler build --no-codegen")
     end
   end
 

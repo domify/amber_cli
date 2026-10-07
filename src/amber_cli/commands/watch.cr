@@ -2,6 +2,7 @@ require "../core/base_command"
 require "../helpers/process_runner"
 require "../helpers/sentry"
 require "../static_assets"
+require "../agent/find_watch_compiler"
 
 # The `watch` command starts a development server that automatically reloads
 # your application when source files change.
@@ -10,6 +11,14 @@ require "../static_assets"
 # ```
 # amber watch [options]
 # ```
+#
+# With a compiler whose `watch` keeps the typed program (crystal-alpha, see
+# `AmberCLI::Agent::FindWatchCompiler`), the rebuild loop is that compiler's
+# `watch`: it rebuilds just what changed and restarts the app, and agent
+# hooks coordinate with it (`watch hold`/`build`). Amber then only rebuilds
+# static assets when `app/assets/` changes, and restarts the loop when a
+# YAML config file changes. Otherwise, or with `--build`, `--run` or
+# `--watch`, it polls the files and runs the build and run commands.
 #
 # ## Options
 # - `-p, --port` - Port to run the server on (default: 3000)
@@ -34,6 +43,15 @@ module AmberCLI::Commands
     getter run_command : String = ""
     getter watch_files : Array(String) = [] of String
     getter show_info : Bool = false
+
+    ASSET_FILES  = ["app/assets/**/*"]
+    CONFIG_FILES = ["config/**/*.yml", "config/**/*.yaml"]
+
+    # The compiler whose `watch` runs the loop, nil for the polling loop.
+    getter watch_compiler : String?
+
+    # How the compiler is found; specs replace it.
+    class_property find_watch_compiler : Proc(String?) = -> { AmberCLI::Agent::FindWatchCompiler.default }
 
     def help_description : String
       "Starts Amber development server and rebuilds on file changes"
@@ -84,6 +102,10 @@ module AmberCLI::Commands
         return
       end
 
+      if compiler = watch_compiler
+        exit run_compiler_watch(compiler)
+      end
+
       info "Starting watch mode..."
       start_watch_process
     end
@@ -105,6 +127,9 @@ module AmberCLI::Commands
       if @watch_files.empty?
         @watch_files = get_default_watch_files
       end
+
+      custom = @parsed_options.has_key?("build") || @parsed_options.has_key?("run") || @parsed_options.has_key?("watch")
+      @watch_compiler = self.class.find_watch_compiler.call unless custom
     end
 
     private def get_app_name
@@ -145,6 +170,17 @@ module AmberCLI::Commands
     end
 
     private def print_info
+      if compiler = watch_compiler
+        puts <<-INFO
+        Watch Configuration:
+          name:       #{@name}
+          compiler:   #{compiler} watch (rebuilds what changed, restarts the app)
+          assets:     amber assets build when app/assets/ changes
+          restart:    #{CONFIG_FILES.join(", ")}
+        INFO
+        return
+      end
+
       puts <<-INFO
       Watch Configuration:
         name:       #{@name}
@@ -183,6 +219,75 @@ module AmberCLI::Commands
       end
 
       process_runner.run
+    end
+
+    # Runs the loop through `<compiler> watch` until interrupted, or until
+    # that stops by itself. Returns the exit code.
+    def run_compiler_watch(compiler : String) : Int32
+      info "Asset step: amber assets build (now and when app/assets/ changes)"
+      return 1 unless build_static_assets
+
+      args = ["watch", "--run"]
+      args.concat(["-o", get_default_run_command]) if AmberCLI::Agent::FindWatchCompiler.writes_output?(compiler)
+      info "Rebuilds: #{compiler} #{args.join(' ')}"
+      info "Press Ctrl+C to stop"
+
+      stopping = false
+      Signal::INT.trap { stopping = true }
+      Signal::TERM.trap { stopping = true }
+
+      assets = snapshot(ASSET_FILES)
+      config = snapshot(CONFIG_FILES)
+      process = Process.new(compiler, args, input: :inherit, output: :inherit, error: :inherit)
+      until stopping
+        sleep 500.milliseconds
+        if process.terminated?
+          status = process.wait
+          error "#{compiler} watch stopped"
+          return status.exit_code? || 1
+        end
+
+        current = snapshot(ASSET_FILES)
+        unless current == assets
+          assets = current
+          build_static_assets
+        end
+
+        current = snapshot(CONFIG_FILES)
+        unless current == config
+          config = current
+          info "Config changed: restarting #{@name}"
+          stop(process)
+          process = Process.new(compiler, args, input: :inherit, output: :inherit, error: :inherit)
+        end
+      end
+
+      puts "\nStopping watch process..."
+      stop(process)
+      0
+    ensure
+      Signal::INT.reset
+      Signal::TERM.reset
+    end
+
+    private def stop(process : Process) : Nil
+      return if process.terminated?
+      process.signal(:term)
+      process.wait
+    rescue RuntimeError
+      # Already gone
+    end
+
+    # Modification times of the files matching *globs*.
+    private def snapshot(globs : Array(String)) : Hash(String, Int64)
+      files = {} of String => Int64
+      globs.each do |glob|
+        Dir.glob(glob).each do |path|
+          file_info = File.info?(path)
+          files[path] = file_info.modification_time.to_unix_ms if file_info && file_info.file?
+        end
+      end
+      files
     end
 
     private def build_static_assets : Bool

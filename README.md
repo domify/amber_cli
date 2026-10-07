@@ -85,6 +85,16 @@ the app without the agent files.
 `amber watch` recompiles assets before the application whenever an ECR template
 or a file under `app/assets/` changes. Open <http://127.0.0.1:3000>.
 
+With a compiler whose `watch` keeps the typed program (`crystal-alpha`, found
+as `crystal-alpha`, `acrystal` or `crystal`, or `$CRYSTAL_ALPHA`), `amber watch`
+hands the rebuild loop to `crystal-alpha watch`: an edited method or template
+rebuilds and restarts the app in a second or two instead of a full compile, and
+the agent hooks build through the same watcher. Amber then rebuilds only the
+static assets when `app/assets/` changes (the app picks up the new manifest
+without a restart) and restarts the loop when a YAML file under `config/`
+changes. `--build`, `--run` or `--watch` keep the classic polling loop;
+`amber watch --info` shows which loop runs.
+
 The web template is deliberately small:
 
 - Amber from `amberframework/amber`, pinned to `2.0.0-beta.5`

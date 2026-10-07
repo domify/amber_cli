@@ -4,31 +4,54 @@ set -u
 project_root=$(CDPATH='' cd "$(dirname "$0")/.." && pwd -P) || exit 2
 cd "$project_root" || exit 2
 
-HOOK_VERSION=6
+HOOK_VERSION=7
 DEFAULT_MINIMUM_AMBER_LSP_VERSION=1.0.0
 MAIN_FILE='__AMBER_MAIN__'
 
+# Whether a compiler's `watch` coordinates builds (`watch hold`/`build`).
+compiler_coordinates_watch() {
+  "$1" watch --help 2>&1 | grep -q 'watch hold'
+}
+
+# The first candidate that coordinates, so an old crystal-alpha doesn't hide
+# a newer compiler (`amber watch` picks the same one); else the first found.
+# Resolved when first needed, so hooks with nothing to do run no compiler.
 compiler_is_stock=0
-if [ -n "${CRYSTAL_ALPHA:-}" ]; then
-  compiler=$CRYSTAL_ALPHA
-elif command -v crystal-alpha >/dev/null 2>&1; then
-  compiler=crystal-alpha
-elif command -v acrystal >/dev/null 2>&1; then
-  compiler=acrystal
-elif command -v crystal >/dev/null 2>&1; then
-  compiler=crystal
-  compiler_is_stock=1
-  echo 'amber-agent-hook: fast rebuilds need crystal-alpha; using stock crystal' >&2
-else
-  compiler=''
-fi
+compiler=''
+compiler_is_resolved=0
+resolve_compiler() {
+  [ "$compiler_is_resolved" -eq 0 ] || return 0
+  compiler_is_resolved=1
+  if [ -n "${CRYSTAL_ALPHA:-}" ]; then
+    compiler=$CRYSTAL_ALPHA
+    return 0
+  fi
+  for candidate in crystal-alpha acrystal crystal; do
+    command -v "$candidate" >/dev/null 2>&1 || continue
+    if compiler_coordinates_watch "$candidate"; then
+      compiler=$candidate
+      return 0
+    fi
+    [ -n "$compiler" ] || compiler=$candidate
+  done
+  if [ "$compiler" = crystal ]; then
+    compiler_is_stock=1
+    echo 'amber-agent-hook: fast rebuilds need crystal-alpha; using stock crystal' >&2
+  fi
+}
 
 watch_coordination_is_available() {
+  resolve_compiler
   [ "$compiler_is_stock" -eq 0 ] || return 1
   [ -n "$compiler" ] || return 1
   "$compiler" watch status >/dev/null 2>&1
   watch_status=$?
-  [ "$watch_status" -eq 0 ] || [ "$watch_status" -eq 2 ]
+  if [ "$watch_status" -eq 0 ] || [ "$watch_status" -eq 2 ]; then
+    return 0
+  fi
+  # 1 is a watcher whose last build failed, or a compiler without
+  # coordination (it prints its usage)
+  [ "$watch_status" -eq 1 ] && compiler_coordinates_watch "$compiler"
 }
 
 resolve_lsp() {
@@ -701,6 +724,7 @@ AMBER_LOOKUP_GUIDANCE
         "$project_root"|"$project_root"/*) ;;
         *) continue ;;
       esac
+      resolve_compiler
       format_output=$("$compiler" tool format "$edited_file" 2>&1)
       format_status=$?
       if [ "$format_status" -ne 0 ]; then
